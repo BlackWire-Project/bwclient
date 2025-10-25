@@ -4,7 +4,7 @@ fn main () {
     // Alice
     let alice_secret = EphemeralSecret::random(&mut OsRng);
     let alice_pk_bytes = EncodedPoint::from(alice_secret.public_key());
-
+ 
     // Bob
     let bob_secret = EphemeralSecret::random(&mut OsRng);
     let bob_pk_bytes = EncodedPoint::from(bob_secret.public_key());
