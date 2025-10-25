@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+elliptic-curve = { version = "0.13.8" }
+p256 = { version = "0.13.2", features = ["ecdh"] }
