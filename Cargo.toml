@@ -6,3 +6,13 @@ edition = "2024"
 [dependencies]
 elliptic-curve = { version = "0.13.8" }
 p256 = { version = "0.13.2", features = ["ecdh"] }
+ratatui = "0.30.0"
+color-eyre = "0.6.3"
+crossterm = "0.29.0"
+
+# Read the optimization guideline for more details: https://ratatui.rs/recipes/apps/release-your-app/#optimizations
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
