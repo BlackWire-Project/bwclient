@@ -4,7 +4,6 @@ use ratatui::{
         Constraint,
         Direction,
         Layout,
-        Rect
     },
     style::{
         Color,

@@ -2,21 +2,7 @@ use std::io;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{
-        Constraint,
-        Direction,
-        Layout,
-    }, style::{
-        Color,
-        Style,
-    }, widgets::{
-        Block,
-        Borders,
-        List,
-        ListItem,
-        ListState,
-        Paragraph,
-    }
+    widgets::ListState,
 };
 use crate::{
     app::App,
