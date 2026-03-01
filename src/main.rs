@@ -1,6 +1,7 @@
 mod app;
 mod drawn;
-
+mod ui;
+mod state;
 
 use std::io;
 use app::App;
