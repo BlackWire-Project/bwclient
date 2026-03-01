@@ -6,13 +6,15 @@ use ratatui::{
 };
 use crate::{
     app::App,
-    ui::{
-        dashboard::Chat,
+    ui::dashboard::{
+        Chat,
+        Home,
     },
 };
 
 pub enum ScreenLocal {
-    Dashboard(Chat),
+    Chat(Chat),
+    Home(Home),
 }
 
 pub struct DrwanApp {
@@ -22,7 +24,7 @@ pub struct DrwanApp {
 impl DrwanApp {
     pub fn new() -> Self {
         Self {
-            screen: ScreenLocal::Dashboard(Chat),
+            screen: ScreenLocal::Home(Home),
         }
     }
 
@@ -31,7 +33,8 @@ impl DrwanApp {
             let size = f.size();
 
             match &mut self.screen {
-                ScreenLocal::Dashboard(wid) => wid.render(app, f, list_state),
+                ScreenLocal::Chat(chat) => chat.render(app, f, list_state),
+                ScreenLocal::Home(dashboard) => dashboard.render(f, size),
             }
         })?;
 
