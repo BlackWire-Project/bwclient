@@ -19,7 +19,13 @@ use ratatui::{
     prelude::CrosstermBackend,
     widgets::ListState
 };
-use crate::drawn::DrwanApp;
+use crate::{
+    drawn::{
+        DrwanApp,
+        ScreenLocal
+    },
+    ui::dashboard::Chat
+};
 
 #[derive(Debug, Clone)]
 pub struct App {
@@ -57,7 +63,7 @@ impl App {
             let result = drawn_app.render_app(&self, &mut terminal, &mut list_state);
 
             if let Ok(events) = event::read() {
-                self.handle_events(events);
+                self.handle_events(events, &mut drawn_app);
             }
 
             if let Err(err) = result {
@@ -84,11 +90,17 @@ impl App {
         }
     }
 
-    pub fn handle_events(&mut self, events: Event) -> io::Result<()> {
+    pub fn handle_events(&mut self, events: Event, app_render: &mut DrwanApp) -> io::Result<()> {
         if let Event::Key(key) = events {
             match key.code {
                 KeyCode::Char('q') => {
                     self.exit()
+                },
+                KeyCode::Enter => {
+                    match app_render.get_screen() {
+                        ScreenLocal::Chat(d) => {},
+                        ScreenLocal::Home(d) => app_render.set_screen(ScreenLocal::Chat(Chat)),
+                    }
                 },
                 KeyCode::Down => self.next_select_menu(),
                 KeyCode::Up => self.previous_select_menu(),

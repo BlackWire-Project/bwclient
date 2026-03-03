@@ -11,7 +11,7 @@ use ratatui::{
         Color,
         Style,
     },
-    text::{Line, Text},
+    text::Line,
     widgets::{
         Block,
         BorderType,
@@ -58,4 +58,6 @@ impl Home {
             Line::raw("Enter<ENT>"),
         ]
     }
+
+
 }

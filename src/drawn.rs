@@ -18,7 +18,7 @@ pub enum ScreenLocal {
 }
 
 pub struct DrwanApp {
-    pub screen: ScreenLocal,
+    screen: ScreenLocal,
 }
 
 impl DrwanApp {
@@ -39,5 +39,13 @@ impl DrwanApp {
         })?;
 
         Ok(())
+    }
+
+    pub fn get_screen(&self) -> &ScreenLocal {
+        &self.screen
+    }
+
+    pub fn set_screen(&mut self, new_value: ScreenLocal) {
+        self.screen = new_value;
     }
 }
