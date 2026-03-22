@@ -1,12 +1,14 @@
 mod app;
-mod drawn;
-mod ui;
+mod crypto;
+mod relay;
 mod state;
+mod storage;
+mod sync;
 
-use std::io;
+use anyhow::Result;
 use app::App;
 
-fn main() -> Result<(), io::Error> {
-    let mut application = App::new();
+fn main() -> Result<()> {
+    let mut application = App::bootstrap()?;
     application.run()
 }
