@@ -47,6 +47,8 @@ pub struct App {
     conversations: Vec<(ConversationRecord, ContactRecord)>,
     selected_conversation: usize,
     messages: Vec<MessageRecord>,
+    message_scroll: u16,
+    message_auto_follow: bool,
     composer: String,
     input_mode: InputMode,
     unread_conversations: BTreeSet<i64>,
@@ -145,6 +147,8 @@ impl App {
             conversations: Vec::new(),
             selected_conversation: 0,
             messages: Vec::new(),
+            message_scroll: 0,
+            message_auto_follow: true,
             composer: String::new(),
             input_mode: InputMode::Command,
             unread_conversations: BTreeSet::new(),
@@ -264,7 +268,7 @@ impl App {
         frame.render_stateful_widget(
             List::new(server_items)
                 .block(server_block)
-                .highlight_style(Style::default().bg(Color::Blue))
+                .highlight_style(selection_style())
                 .highlight_symbol(">> "),
             split[0],
             &mut server_state,
@@ -272,7 +276,7 @@ impl App {
         frame.render_stateful_widget(
             List::new(profile_items)
                 .block(profile_block)
-                .highlight_style(Style::default().bg(Color::Blue))
+                .highlight_style(selection_style())
                 .highlight_symbol(">> "),
             split[1],
             &mut profile_state,
@@ -345,46 +349,31 @@ impl App {
                         .title("Conversations")
                         .borders(Borders::ALL),
                 )
-                .highlight_style(Style::default().bg(Color::Blue))
+                .highlight_style(selection_style())
                 .highlight_symbol(">> "),
             horizontal[0],
             &mut conversation_state,
         );
 
-        let message_lines = if self.messages.is_empty() {
-            vec![Line::from("No messages yet")]
+        let message_lines = self.message_lines();
+        let message_viewport_height = message_viewport_height(horizontal[1]);
+        let max_scroll = self.max_message_scroll(horizontal[1], &message_lines);
+        let message_scroll = if self.message_auto_follow {
+            max_scroll
         } else {
-            self.messages
-                .iter()
-                .map(|message| {
-                    let prefix = match message.direction {
-                        MessageDirection::Incoming => "<",
-                        MessageDirection::Outgoing => ">",
-                    };
-                    let body = message.body.as_deref().unwrap_or("<raw envelope>");
-                    Line::from(vec![
-                        Span::styled(
-                            format!("[{}] ", message.created_at),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(prefix, Style::default().fg(Color::Cyan)),
-                        Span::raw(format!(" {}", body)),
-                        Span::styled(
-                            message
-                                .error_reason
-                                .as_ref()
-                                .map(|error| format!(" ({error})"))
-                                .unwrap_or_default(),
-                            Style::default().fg(Color::Yellow),
-                        ),
-                    ])
-                })
-                .collect()
+            self.message_scroll.min(max_scroll)
         };
         frame.render_widget(
             Paragraph::new(Text::from(message_lines))
-                .block(Block::default().title("Messages").borders(Borders::ALL))
-                .wrap(Wrap { trim: false }),
+                .block(
+                    Block::default()
+                        .title(format!(
+                            "Messages [PgUp/PgDn/Home/End] ({message_viewport_height} lines)"
+                        ))
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: false })
+                .scroll((message_scroll, 0)),
             horizontal[1],
         );
 
@@ -414,7 +403,7 @@ impl App {
 
         let status = Paragraph::new(Text::from(vec![
             Line::from(
-                "F1 add contact | F2 tech | F5 sync | F6 logout | F9 compose | Esc command | q quit",
+                "F1 add contact | F2 tech | F5 sync | F6 logout | F9 compose | PgUp/PgDn scroll | q quit",
             ),
             Line::from(format!(
                 "poll={} stored={} unresolved={}",
@@ -728,10 +717,16 @@ impl App {
                     let _ = self.refresh_login_data();
                 }
                 KeyCode::F(9) => self.input_mode = InputMode::Compose,
+                KeyCode::PageUp => self.scroll_messages_page(-1),
+                KeyCode::PageDown => self.scroll_messages_page(1),
+                KeyCode::Home => self.scroll_messages_to_top(),
+                KeyCode::End => self.scroll_messages_to_bottom(),
                 KeyCode::Down => {
                     if !self.conversations.is_empty() {
                         self.selected_conversation =
                             (self.selected_conversation + 1) % self.conversations.len();
+                        self.message_auto_follow = true;
+                        self.message_scroll = u16::MAX;
                         let _ = self.reload_messages();
                     }
                 }
@@ -742,6 +737,8 @@ impl App {
                         } else {
                             self.selected_conversation - 1
                         };
+                        self.message_auto_follow = true;
+                        self.message_scroll = u16::MAX;
                         let _ = self.reload_messages();
                     }
                 }
@@ -917,6 +914,7 @@ impl App {
     }
 
     fn reload_messages(&mut self) -> Result<()> {
+        let was_auto_follow = self.message_auto_follow;
         self.messages.clear();
         if let Some(conversation_id) = self
             .current_conversation()
@@ -925,6 +923,10 @@ impl App {
             self.unread_conversations.remove(&conversation_id);
             self.messages = self.storage.get_messages(conversation_id)?;
         }
+        if was_auto_follow {
+            self.message_scroll = u16::MAX;
+        }
+        self.normalize_message_scroll();
         Ok(())
     }
 
@@ -1330,6 +1332,127 @@ impl App {
         self.servers.get(self.selected_server)
     }
 
+    fn message_lines(&self) -> Vec<Line<'static>> {
+        if self.messages.is_empty() {
+            return vec![Line::from("No messages yet")];
+        }
+
+        self.messages
+            .iter()
+            .map(|message| {
+                let incoming = match message.direction {
+                    MessageDirection::Incoming => true,
+                    MessageDirection::Outgoing => false,
+                };
+                let prefix = if incoming { "<" } else { ">" };
+                let body = message.body.as_deref().unwrap_or("<raw envelope>");
+                Line::from(vec![
+                    Span::styled(
+                        format!("[{}] ", message.created_at),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        prefix,
+                        if incoming {
+                            Style::default().fg(Color::Blue)
+                        } else {
+                            Style::default().fg(Color::LightGreen)
+                        },
+                    ),
+                    Span::raw(format!(" {}", body)),
+                    Span::styled(
+                        message
+                            .error_reason
+                            .as_ref()
+                            .map(|error| format!(" ({error})"))
+                            .unwrap_or_default(),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ])
+            })
+            .collect()
+    }
+
+    fn max_message_scroll(&self, area: Rect, message_lines: &[Line<'static>]) -> u16 {
+        let visible_height = message_viewport_height(area);
+        if visible_height == 0 {
+            return 0;
+        }
+
+        let total_height = message_lines
+            .iter()
+            .map(|line| wrapped_line_height(line, area.width.saturating_sub(2)))
+            .sum::<u16>();
+
+        total_height.saturating_sub(visible_height)
+    }
+
+    fn scroll_messages_page(&mut self, direction: i32) {
+        let page = message_viewport_height(self.current_message_area()).max(1);
+        if direction < 0 {
+            self.message_auto_follow = false;
+            self.message_scroll = self.message_scroll.saturating_sub(page);
+        } else {
+            self.message_scroll = self.message_scroll.saturating_add(page);
+        }
+        self.normalize_message_scroll();
+    }
+
+    fn scroll_messages_to_top(&mut self) {
+        self.message_auto_follow = false;
+        self.message_scroll = 0;
+    }
+
+    fn scroll_messages_to_bottom(&mut self) {
+        self.message_auto_follow = true;
+        self.message_scroll = u16::MAX;
+        self.normalize_message_scroll();
+    }
+
+    fn normalize_message_scroll(&mut self) {
+        let area = self.current_message_area();
+        let lines = self.message_lines();
+        let max_scroll = self.max_message_scroll(area, &lines);
+
+        if self.message_auto_follow || self.message_scroll >= max_scroll {
+            self.message_auto_follow = true;
+            self.message_scroll = max_scroll;
+        } else {
+            self.message_scroll = self.message_scroll.min(max_scroll);
+        }
+    }
+
+    fn current_message_area(&self) -> Rect {
+        let Ok((width, height)) = crossterm::terminal::size() else {
+            return Rect::default();
+        };
+
+        let area = Rect::new(0, 0, width, height);
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(8),
+                Constraint::Length(4),
+                Constraint::Length(3),
+            ])
+            .split(area);
+        let constraints = if self.show_technical {
+            vec![
+                Constraint::Percentage(24),
+                Constraint::Percentage(48),
+                Constraint::Percentage(28),
+            ]
+        } else {
+            vec![Constraint::Percentage(28), Constraint::Percentage(72)]
+        };
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(constraints)
+            .split(vertical[0]);
+
+        horizontal.get(1).copied().unwrap_or_default()
+    }
+
     fn selected_profile_record(&self) -> Option<&LocalProfileRecord> {
         self.profiles.get(self.selected_profile)
     }
@@ -1357,6 +1480,20 @@ fn shorten(value: &str, max: usize) -> String {
     format!("{shortened}...")
 }
 
+fn message_viewport_height(area: Rect) -> u16 {
+    area.height.saturating_sub(2)
+}
+
+fn wrapped_line_height(line: &Line<'_>, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+
+    let visual_width = line.width().max(1);
+    let width = usize::from(width);
+    visual_width.div_ceil(width) as u16
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -1375,4 +1512,11 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn selection_style() -> Style {
+    Style::default()
+        .bg(Color::Rgb(28, 32, 38))
+        .fg(Color::Rgb(232, 236, 241))
+        .add_modifier(Modifier::BOLD)
 }
