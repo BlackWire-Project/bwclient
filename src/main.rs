@@ -4,6 +4,7 @@ mod relay;
 mod state;
 mod storage;
 mod sync;
+mod ui;
 
 use anyhow::Result;
 use app::App;
