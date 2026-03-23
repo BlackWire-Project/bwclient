@@ -162,11 +162,20 @@ impl RelayClient {
         }
 
         let status = response.status();
-        let error = response
-            .json::<ErrorEnvelope>()
-            .map(|body| body.error)
-            .unwrap_or_else(|_| format!("relay request failed with status {status}"));
-        bail!("{error}")
+        let body = response.text().unwrap_or_default();
+        let error = serde_json::from_str::<ErrorEnvelope>(&body)
+            .map(|parsed| parsed.error)
+            .ok()
+            .or_else(|| {
+                let trimmed = body.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+            .unwrap_or_else(|| format!("relay request failed with status {status}"));
+        bail!("{status}: {error}")
     }
 }
 

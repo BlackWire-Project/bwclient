@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, io};
+use std::{
+    collections::BTreeSet,
+    io,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 use crossterm::{
@@ -56,6 +60,7 @@ pub struct App {
     last_ingest_stored: usize,
     last_ingest_unresolved: usize,
     last_receive_error: Option<String>,
+    toast: Option<ToastState>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,6 +92,25 @@ enum IngestOutcome {
         reason: String,
     },
     Ignored,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToastMode {
+    AutoDismiss,
+    Sticky,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToastKind {
+    ApiError,
+    SyncError,
+}
+
+struct ToastState {
+    kind: ToastKind,
+    message: String,
+    mode: ToastMode,
+    expires_at: Option<Instant>,
 }
 
 struct FormState {
@@ -156,6 +180,7 @@ impl App {
             last_ingest_stored: 0,
             last_ingest_unresolved: 0,
             last_receive_error: None,
+            toast: None,
         };
         app.refresh_login_data()?;
         if app.servers.is_empty() {
@@ -182,6 +207,7 @@ impl App {
 
     fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         while !self.exit {
+            self.expire_toast_if_needed();
             self.consume_sync_events();
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(std::time::Duration::from_millis(120))? {
@@ -210,6 +236,42 @@ impl App {
             }
             Screen::Main => self.draw_main(frame),
         }
+        self.draw_toast(frame);
+    }
+
+    fn draw_toast(&self, frame: &mut ratatui::Frame<'_>) {
+        let Some(toast) = &self.toast else {
+            return;
+        };
+
+        let area = centered_rect(56, 22, frame.area());
+        let title = match toast.kind {
+            ToastKind::ApiError => "API Error",
+            ToastKind::SyncError => "Sync Error",
+        };
+        let footer = match toast.mode {
+            ToastMode::AutoDismiss => "This message will close automatically.",
+            ToastMode::Sticky => "Press Esc to dismiss.",
+        };
+        let lines = vec![
+            Line::from(toast.message.as_str()),
+            Line::from(""),
+            Line::from(footer),
+        ];
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(toast_border_style())
+                        .style(toast_body_style()),
+                )
+                .wrap(Wrap { trim: false }),
+            area,
+        );
     }
 
     fn draw_login(&self, frame: &mut ratatui::Frame<'_>) {
@@ -533,6 +595,9 @@ impl App {
             if key.kind != KeyEventKind::Press {
                 return Ok(());
             }
+            if matches!(key.code, KeyCode::Esc) && self.dismiss_toast() {
+                return Ok(());
+            }
             let screen = std::mem::replace(&mut self.screen, Screen::Login);
             match screen {
                 Screen::Login => {
@@ -622,7 +687,9 @@ impl App {
                 if let Some(profile) = self.selected_profile_record() {
                     match self.activate_profile(profile.id) {
                         Ok(_) => {}
-                        Err(error) => self.status = error.to_string(),
+                        Err(error) => {
+                            self.show_api_error_toast(error.to_string(), ToastMode::Sticky)
+                        }
                     }
                 } else {
                     self.status = "Select a profile first.".to_string();
@@ -651,7 +718,7 @@ impl App {
                 };
                 match outcome {
                     Ok(_) => keep_open = false,
-                    Err(error) => self.status = error.to_string(),
+                    Err(error) => self.show_api_error_toast(error.to_string(), ToastMode::Sticky),
                 }
             }
             KeyCode::Char(ch) => form.current_mut().push(ch),
@@ -678,7 +745,7 @@ impl App {
             KeyCode::F(2) => form.use_username = !form.use_username,
             KeyCode::Enter => match self.submit_add_contact(form) {
                 Ok(_) => keep_open = false,
-                Err(error) => self.status = error.to_string(),
+                Err(error) => self.show_api_error_toast(error.to_string(), ToastMode::Sticky),
             },
             KeyCode::Char(ch) => {
                 if form.field_index == 0 {
@@ -751,7 +818,7 @@ impl App {
                 }
                 KeyCode::Enter => match self.send_current_message() {
                     Ok(_) => {}
-                    Err(error) => self.status = error.to_string(),
+                    Err(error) => self.show_api_error_toast(error.to_string(), ToastMode::Sticky),
                 },
                 KeyCode::Char(ch) => self.composer.push(ch),
                 KeyCode::Tab => self.composer.push('\t'),
@@ -1020,7 +1087,7 @@ impl App {
             match event {
                 SyncEvent::Messages { profile_id, items } if Some(profile_id) == active_profile => {
                     if let Err(error) = self.ingest_messages(items) {
-                        self.status = error.to_string();
+                        self.show_sync_error_toast(error.to_string(), ToastMode::AutoDismiss);
                     }
                 }
                 SyncEvent::Status {
@@ -1033,7 +1100,7 @@ impl App {
                     profile_id,
                     message,
                 } if Some(profile_id) == active_profile => {
-                    self.status = message;
+                    self.show_sync_error_toast(message, ToastMode::AutoDismiss);
                 }
                 _ => {}
             }
@@ -1332,6 +1399,46 @@ impl App {
         self.servers.get(self.selected_server)
     }
 
+    fn show_api_error_toast(&mut self, message: String, mode: ToastMode) {
+        self.status = message.clone();
+        self.toast = Some(ToastState {
+            kind: ToastKind::ApiError,
+            message: friendly_error_message(&message),
+            mode,
+            expires_at: toast_expiration(mode),
+        });
+    }
+
+    fn show_sync_error_toast(&mut self, message: String, mode: ToastMode) {
+        self.status = message.clone();
+        self.toast = Some(ToastState {
+            kind: ToastKind::SyncError,
+            message: friendly_error_message(&message),
+            mode,
+            expires_at: toast_expiration(mode),
+        });
+    }
+
+    fn dismiss_toast(&mut self) -> bool {
+        if self.toast.is_some() {
+            self.toast = None;
+            return true;
+        }
+        false
+    }
+
+    fn expire_toast_if_needed(&mut self) {
+        let should_clear = self
+            .toast
+            .as_ref()
+            .and_then(|toast| toast.expires_at)
+            .map(|expires_at| Instant::now() >= expires_at)
+            .unwrap_or(false);
+        if should_clear {
+            self.toast = None;
+        }
+    }
+
     fn message_lines(&self) -> Vec<Line<'static>> {
         if self.messages.is_empty() {
             return vec![Line::from("No messages yet")];
@@ -1519,4 +1626,47 @@ fn selection_style() -> Style {
         .bg(Color::Rgb(28, 32, 38))
         .fg(Color::Rgb(232, 236, 241))
         .add_modifier(Modifier::BOLD)
+}
+
+fn toast_border_style() -> Style {
+    Style::default()
+        .bg(Color::Rgb(19, 22, 28))
+        .fg(Color::Rgb(214, 92, 92))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn toast_body_style() -> Style {
+    Style::default()
+        .bg(Color::Rgb(19, 22, 28))
+        .fg(Color::Rgb(236, 239, 243))
+}
+
+fn toast_expiration(mode: ToastMode) -> Option<Instant> {
+    match mode {
+        ToastMode::AutoDismiss => Some(Instant::now() + Duration::from_secs(5)),
+        ToastMode::Sticky => None,
+    }
+}
+
+fn friendly_error_message(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("already exists") || lower.contains("username already exists") {
+        return "Username already exists on this relay.".to_string();
+    }
+    if lower.contains("failed to call relay health endpoint") {
+        return "Could not reach the relay health endpoint.".to_string();
+    }
+    if lower.contains("failed to call post /users") {
+        return "Profile registration request failed.".to_string();
+    }
+    if lower.contains("failed to fetch bundle") {
+        return "Could not fetch the contact bundle from the relay.".to_string();
+    }
+    if lower.contains("failed to call post /messages") {
+        return "Message send request failed.".to_string();
+    }
+    if lower.contains("poll failed:") {
+        return message.replacen("poll failed:", "Relay polling failed:", 1);
+    }
+    message.to_string()
 }
