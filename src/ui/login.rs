@@ -14,33 +14,28 @@ pub(crate) fn render_login(app: &App, frame: &mut Frame<'_>) {
     let area = frame.area();
     let elapsed_ms = app.started_at.elapsed().as_millis();
 
-    // The main layout: Hero, Subtitle, Main Content, Status Footer.
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7), // For the main hero banner
-            Constraint::Length(2), // For the subtitle
-            Constraint::Min(10),   // For server/profile lists
-            Constraint::Length(4), // For the status bar
+            Constraint::Length(7),
+            Constraint::Length(2),
+            Constraint::Min(10),
+            Constraint::Length(4),
         ])
         .split(area);
 
-    // --- Hero Section ---
     let hero_block = Block::default()
         .title("BlackWire Client")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(244, 198, 86)))
+        .border_style(Style::default().fg(Color::Rgb(249, 128, 41)))
         .style(Style::default().bg(Color::Rgb(16, 18, 24)));
 
     let hero_inner_area = hero_block.inner(vertical[0]);
     frame.render_widget(hero_block, vertical[0]);
 
-    // Generate and render the new animated hero.
-    let hero_content =
-        branding::animated_hero(hero_inner_area.width, elapsed_ms, app.started_at);
+    let hero_content = branding::animated_hero(hero_inner_area.width, elapsed_ms, app.started_at);
     frame.render_widget(Paragraph::new(hero_content), hero_inner_area);
 
-    // --- Subtitle Section ---
     let subtitle_text =
         "A relay-backed terminal client with local profiles and encrypted sessions.";
     frame.render_widget(
@@ -51,7 +46,6 @@ pub(crate) fn render_login(app: &App, frame: &mut Frame<'_>) {
         vertical[1],
     );
 
-    // --- Main Content: Servers and Profiles ---
     let main_content_area = vertical[2];
     let split = Layout::default()
         .direction(Direction::Horizontal)
@@ -118,7 +112,6 @@ pub(crate) fn render_login(app: &App, frame: &mut Frame<'_>) {
         &mut profile_state,
     );
 
-    // --- Status Footer ---
     let status = Paragraph::new(Text::from(vec![
         Line::from("Keys: a add server | n new profile | Tab switch | Enter login | q quit"),
         Line::from(
@@ -133,6 +126,6 @@ pub(crate) fn render_login(app: &App, frame: &mut Frame<'_>) {
             .border_style(Style::default().fg(Color::Rgb(84, 94, 110))),
     )
     .wrap(Wrap { trim: true })
-    .style(Style::default().add_modifier(Modifier::DIM));
+    .style(Style::default().fg(Color::Rgb(84, 94, 110)));
     frame.render_widget(status, vertical[3]);
 }

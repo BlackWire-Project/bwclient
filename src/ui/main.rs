@@ -71,7 +71,8 @@ pub(crate) fn render_main(app: &App, frame: &mut Frame<'_>) {
             .block(
                 Block::default()
                     .title("Conversations")
-                    .borders(Borders::ALL),
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Rgb(249, 128, 41))),
             )
             .highlight_style(selection_style())
             .highlight_symbol(">> "),
@@ -94,7 +95,8 @@ pub(crate) fn render_main(app: &App, frame: &mut Frame<'_>) {
                     .title(format!(
                         "Messages [PgUp/PgDn/Home/End] ({message_viewport_height} lines)"
                     ))
-                    .borders(Borders::ALL),
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Rgb(240, 205, 156))),
             )
             .wrap(Wrap { trim: false })
             .scroll((message_scroll, 0)),
@@ -115,9 +117,9 @@ pub(crate) fn render_main(app: &App, frame: &mut Frame<'_>) {
                     })
                     .borders(Borders::ALL)
                     .border_style(match app.input_mode {
-                        InputMode::Command => Style::default(),
+                        InputMode::Command => Style::default().fg(Color::Rgb(84, 94, 110)),
                         InputMode::Compose => Style::default()
-                            .fg(Color::Yellow)
+                            .fg(Color::Rgb(249, 128, 41))
                             .add_modifier(Modifier::BOLD),
                     }),
             )
@@ -135,8 +137,9 @@ pub(crate) fn render_main(app: &App, frame: &mut Frame<'_>) {
         )),
         Line::from(app.status.as_str()),
     ]))
-    .block(Block::default().title("Status").borders(Borders::ALL))
-    .wrap(Wrap { trim: true });
+    .block(Block::default().title("Status").borders(Borders::ALL).border_style(Style::default().fg(Color::Rgb(84, 94, 110))))
+    .wrap(Wrap { trim: true })
+    .style(Style::default().fg(Color::Rgb(84, 94, 110)));
     frame.render_widget(status, vertical[2]);
 }
 
@@ -195,6 +198,12 @@ fn technical_panel(app: &App) -> Paragraph<'_> {
     )));
 
     Paragraph::new(Text::from(lines))
-        .block(Block::default().title("Technical").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Technical")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Rgb(84, 94, 110))),
+        )
+        .style(Style::default().fg(Color::Rgb(84, 94, 110)))
         .wrap(Wrap { trim: true })
 }

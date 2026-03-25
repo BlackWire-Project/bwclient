@@ -177,7 +177,7 @@ impl App {
     pub(crate) fn focus_style(&self, focus: LoginFocus) -> Style {
         if self.login_focus == focus {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Rgb(249, 128, 41))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
