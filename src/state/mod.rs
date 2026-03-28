@@ -15,6 +15,7 @@ pub struct LocalProfileRecord {
     pub username: String,
     pub inbox_id: String,
     pub registered: bool,
+    pub last_synced_relay_message_id: Option<String>,
     pub keys: StoredProfileKeys,
 }
 

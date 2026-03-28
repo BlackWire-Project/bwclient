@@ -80,6 +80,19 @@ pub struct RelayMessage {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct ListMessagesResponse {
+    pub items: Vec<RelayMessage>,
+    pub next_after_id: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct WsNotification {
+    pub r#type: String,
+    pub message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct ErrorEnvelope {
     error: String,
 }
@@ -141,13 +154,35 @@ impl RelayClient {
         )
     }
 
-    pub fn list_messages(&self, inbox_id: &str, limit: usize) -> Result<Vec<RelayMessage>> {
+    pub fn list_messages(
+        &self,
+        inbox_id: &str,
+        limit: usize,
+        after_id: Option<&str>,
+    ) -> Result<ListMessagesResponse> {
+        self.handle_response({
+            let mut request = self
+                .http
+                .get(format!("{}/messages", self.base_url))
+                .query(&[("inbox_id", inbox_id), ("limit", &limit.to_string())]);
+            if let Some(after_id) = after_id {
+                request = request.query(&[("after_id", after_id)]);
+            }
+            request
+                .send()
+                .with_context(|| format!("failed to list messages for inbox {inbox_id}"))?
+        })
+    }
+
+    pub fn get_message(&self, inbox_id: &str, message_id: &str) -> Result<RelayMessage> {
         self.handle_response(
             self.http
-                .get(format!("{}/messages", self.base_url))
-                .query(&[("inbox_id", inbox_id), ("limit", &limit.to_string())])
+                .get(format!("{}/messages/{message_id}", self.base_url))
+                .query(&[("inbox_id", inbox_id)])
                 .send()
-                .with_context(|| format!("failed to list messages for inbox {inbox_id}"))?,
+                .with_context(|| {
+                    format!("failed to fetch message {message_id} for inbox {inbox_id}")
+                })?,
         )
     }
 

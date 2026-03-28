@@ -172,9 +172,11 @@ impl App {
     }
 
     pub(crate) fn send_current_message(&mut self) -> Result<()> {
-        if self.composer.trim().is_empty() {
+        let plaintext = self.composer.trim().to_string();
+        if plaintext.is_empty() {
             return Ok(());
         }
+        let previous_composer = std::mem::take(&mut self.composer);
         let profile = self
             .active_profile
             .clone()
@@ -188,70 +190,80 @@ impl App {
             .cloned()
             .ok_or_else(|| anyhow!("select a conversation"))?;
         let relay = RelayClient::new(server.base_url.clone())?;
-        let plaintext = self.composer.trim().to_string();
 
-        let prepared = if let Some(session) = conversation.session.clone() {
-            let mut session = session;
-            if session.pending_send_ratchet {
-                rotate_local_ratchet(&mut session)?;
-            }
-            prepare_session_message(&session, &profile.username, &profile.inbox_id, &plaintext)?
-        } else {
-            let username = contact.username.clone().ok_or_else(|| {
-                anyhow!("this contact has no username; bootstrap requires bundle discovery")
+        let send_result: Result<PostMessageResponse> = (|| {
+            let prepared = if let Some(session) = conversation.session.clone() {
+                let mut session = session;
+                if session.pending_send_ratchet {
+                    rotate_local_ratchet(&mut session)?;
+                }
+                prepare_session_message(&session, &profile.username, &profile.inbox_id, &plaintext)?
+            } else {
+                let username = contact.username.clone().ok_or_else(|| {
+                    anyhow!("this contact has no username; bootstrap requires bundle discovery")
+                })?;
+                let bundle = relay.get_bundle(&username)?;
+                let prepared = prepare_initial_message(
+                    &profile.username,
+                    &profile.inbox_id,
+                    &profile.keys,
+                    &bundle,
+                    &plaintext,
+                )?;
+                let identity = parse_identity_json(&bundle.identity_key)?;
+                self.storage.upsert_contact(
+                    profile.id,
+                    &UpsertContact {
+                        username: Some(bundle.username.clone()),
+                        inbox_id: Some(bundle.inbox_id.clone()),
+                        display_name: contact.display_name.clone(),
+                        identity_key: Some(serde_json::to_string(&identity)?),
+                    },
+                )?;
+                prepared
+            };
+
+            let response = relay.post_message(&PostMessageRequest {
+                inbox_id: prepared.relay_inbox_id.clone(),
+                kind: prepared.relay_kind.clone(),
+                header: prepared.header_json.clone(),
+                ciphertext: prepared.ciphertext.clone(),
+                used_prekey_id: prepared.used_prekey_id.clone(),
+                client_message_id: prepared.client_message_id.clone(),
             })?;
-            let bundle = relay.get_bundle(&username)?;
-            let prepared = prepare_initial_message(
-                &profile.username,
-                &profile.inbox_id,
-                &profile.keys,
-                &bundle,
-                &plaintext,
-            )?;
-            let identity = parse_identity_json(&bundle.identity_key)?;
-            self.storage.upsert_contact(
-                profile.id,
-                &UpsertContact {
-                    username: Some(bundle.username.clone()),
-                    inbox_id: Some(bundle.inbox_id.clone()),
-                    display_name: contact.display_name.clone(),
-                    identity_key: Some(serde_json::to_string(&identity)?),
+
+            self.storage
+                .set_session(conversation.id, &prepared.session)?;
+            self.storage.insert_message(
+                conversation.id,
+                &NewMessage {
+                    relay_message_id: Some(response.id.clone()),
+                    client_message_id: prepared.client_message_id,
+                    direction: MessageDirection::Outgoing,
+                    body: Some(plaintext.clone()),
+                    header: prepared.header_json,
+                    ciphertext: prepared.ciphertext,
+                    relay_kind: prepared.relay_kind,
+                    created_at: response.created_at.clone(),
+                    status: MessageStatus::Sent,
+                    error_reason: None,
                 },
             )?;
-            prepared
-        };
 
-        let response = relay.post_message(&PostMessageRequest {
-            inbox_id: prepared.relay_inbox_id.clone(),
-            kind: prepared.relay_kind.clone(),
-            header: prepared.header_json.clone(),
-            ciphertext: prepared.ciphertext.clone(),
-            used_prekey_id: prepared.used_prekey_id.clone(),
-            client_message_id: prepared.client_message_id.clone(),
-        })?;
+            Ok(response)
+        })();
 
-        self.storage
-            .set_session(conversation.id, &prepared.session)?;
-        self.storage.insert_message(
-            conversation.id,
-            &NewMessage {
-                relay_message_id: Some(response.id),
-                client_message_id: prepared.client_message_id,
-                direction: MessageDirection::Outgoing,
-                body: Some(plaintext),
-                header: prepared.header_json,
-                ciphertext: prepared.ciphertext,
-                relay_kind: prepared.relay_kind,
-                created_at: response.created_at,
-                status: MessageStatus::Sent,
-                error_reason: None,
-            },
-        )?;
-
-        self.composer.clear();
-        self.reload_conversations()?;
-        self.sync.trigger();
-        self.status = format!("Message sent. Expires at {}.", response.expires_at);
-        Ok(())
+        match send_result {
+            Ok(response) => {
+                self.reload_conversations()?;
+                self.sync.trigger();
+                self.status = format!("Message sent. Expires at {}.", response.expires_at);
+                Ok(())
+            }
+            Err(error) => {
+                self.composer = previous_composer;
+                Err(error)
+            }
+        }
     }
 }

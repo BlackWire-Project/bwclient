@@ -8,27 +8,19 @@ use std::{
     time::Duration,
 };
 
+use serde_json::from_str;
 use tungstenite::{Message, connect};
 
 use crate::{
-    relay::RelayClient,
+    relay::{RelayClient, RelayMessage, WsNotification},
     state::{LocalProfileRecord, ServerRecord},
 };
 
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
-    Messages {
-        profile_id: i64,
-        items: Vec<crate::relay::RelayMessage>,
-    },
-    Status {
-        profile_id: i64,
-        message: String,
-    },
-    Error {
-        profile_id: i64,
-        message: String,
-    },
+    Message { profile_id: i64, item: RelayMessage },
+    Status { profile_id: i64, message: String },
+    Error { profile_id: i64, message: String },
 }
 
 pub struct SyncService {
@@ -63,13 +55,17 @@ impl SyncService {
         let ws_stop = stop.clone();
         let profile_for_poll = profile.clone();
         let server_for_poll = server.clone();
+        let profile_for_ws = profile.clone();
+        let server_for_ws = server.clone();
         let trigger_tx_for_ws = trigger_tx.clone();
+        let events_tx_for_poll = events_tx.clone();
+        let events_tx_for_ws = events_tx.clone();
 
         thread::spawn(move || {
             let client = match RelayClient::new(server_for_poll.base_url.clone()) {
                 Ok(client) => client,
                 Err(error) => {
-                    let _ = events_tx.send(SyncEvent::Error {
+                    let _ = events_tx_for_poll.send(SyncEvent::Error {
                         profile_id: profile_for_poll.id,
                         message: error.to_string(),
                     });
@@ -77,33 +73,56 @@ impl SyncService {
                 }
             };
 
-            let _ = events_tx.send(SyncEvent::Status {
+            let _ = events_tx_for_poll.send(SyncEvent::Status {
                 profile_id: profile_for_poll.id,
                 message: "sync worker online".to_string(),
             });
 
             let _ = trigger_rx.recv_timeout(Duration::from_millis(10));
+            let mut after_id = profile_for_poll.last_synced_relay_message_id.clone();
             loop {
                 if poll_stop.load(Ordering::Relaxed) {
                     break;
                 }
 
-                match client.list_messages(&profile_for_poll.inbox_id, 200) {
-                    Ok(items) => {
-                        let _ = events_tx.send(SyncEvent::Messages {
-                            profile_id: profile_for_poll.id,
-                            items,
-                        });
-                    }
+                match client.list_messages(&profile_for_poll.inbox_id, 100, after_id.as_deref()) {
+                    Ok(mut response) => loop {
+                        for item in response.items {
+                            after_id = Some(item.id.clone());
+                            let _ = events_tx_for_poll.send(SyncEvent::Message {
+                                profile_id: profile_for_poll.id,
+                                item,
+                            });
+                        }
+
+                        if !response.has_more {
+                            break;
+                        }
+
+                        response = match client.list_messages(
+                            &profile_for_poll.inbox_id,
+                            100,
+                            response.next_after_id.as_deref(),
+                        ) {
+                            Ok(response) => response,
+                            Err(error) => {
+                                let _ = events_tx_for_poll.send(SyncEvent::Error {
+                                    profile_id: profile_for_poll.id,
+                                    message: format!("poll failed: {error}"),
+                                });
+                                break;
+                            }
+                        };
+                    },
                     Err(error) => {
-                        let _ = events_tx.send(SyncEvent::Error {
+                        let _ = events_tx_for_poll.send(SyncEvent::Error {
                             profile_id: profile_for_poll.id,
                             message: format!("poll failed: {error}"),
                         });
                     }
                 }
 
-                match trigger_rx.recv_timeout(Duration::from_secs(3)) {
+                match trigger_rx.recv_timeout(Duration::from_secs(15)) {
                     Ok(_) => {}
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -112,26 +131,58 @@ impl SyncService {
         });
 
         thread::spawn(move || {
-            let ws_url = server
+            let ws_url = server_for_ws
                 .ws_url
                 .clone()
-                .unwrap_or_else(|| format!("{}/ws", server.base_url.replace("http", "ws")));
+                .unwrap_or_else(|| format!("{}/ws", server_for_ws.base_url.replace("http", "ws")));
             loop {
                 if ws_stop.load(Ordering::Relaxed) {
                     break;
                 }
 
-                match connect(format!("{ws_url}?inbox_id={}", profile.inbox_id).as_str()) {
+                match connect(format!("{ws_url}?inbox_id={}", profile_for_ws.inbox_id).as_str()) {
                     Ok((mut socket, _)) => {
-                        let _ = trigger_tx_for_ws.send(());
                         while !ws_stop.load(Ordering::Relaxed) {
                             match socket.read() {
-                                Ok(Message::Text(_))
-                                | Ok(Message::Binary(_))
-                                | Ok(Message::Ping(_))
-                                | Ok(Message::Pong(_)) => {
-                                    let _ = trigger_tx_for_ws.send(());
+                                Ok(Message::Text(text)) => {
+                                    match from_str::<WsNotification>(&text) {
+                                        Ok(notification)
+                                            if notification.r#type == "messages_available" =>
+                                        {
+                                            if let Some(message_id) = notification.message_id {
+                                                match RelayClient::new(
+                                                    server_for_ws.base_url.clone(),
+                                                )
+                                                .and_then(|client| {
+                                                    client.get_message(
+                                                        &profile_for_ws.inbox_id,
+                                                        &message_id,
+                                                    )
+                                                }) {
+                                                    Ok(item) => {
+                                                        let _ = events_tx_for_ws.send(
+                                                            SyncEvent::Message {
+                                                                profile_id: profile_for_ws.id,
+                                                                item,
+                                                            },
+                                                        );
+                                                    }
+                                                    Err(_) => {
+                                                        let _ = trigger_tx_for_ws.send(());
+                                                    }
+                                                }
+                                            } else {
+                                                let _ = trigger_tx_for_ws.send(());
+                                            }
+                                        }
+                                        _ => {
+                                            let _ = trigger_tx_for_ws.send(());
+                                        }
+                                    }
                                 }
+                                Ok(Message::Binary(_))
+                                | Ok(Message::Ping(_))
+                                | Ok(Message::Pong(_)) => {}
                                 Ok(Message::Close(_)) => break,
                                 Ok(Message::Frame(_)) => {}
                                 Err(_) => break,
