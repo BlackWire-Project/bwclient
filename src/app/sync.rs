@@ -5,8 +5,8 @@ impl App {
         let active_profile = self.active_profile.as_ref().map(|profile| profile.id);
         for event in self.sync.drain() {
             match event {
-                SyncEvent::Messages { profile_id, items } if Some(profile_id) == active_profile => {
-                    if let Err(error) = self.ingest_messages(items) {
+                SyncEvent::Message { profile_id, item } if Some(profile_id) == active_profile => {
+                    if let Err(error) = self.ingest_messages(vec![item]) {
                         self.show_sync_error_toast(error.to_string(), ToastMode::AutoDismiss);
                     }
                 }
@@ -31,7 +31,9 @@ impl App {
         self.last_poll_count = items.len();
         let mut inserted = 0usize;
         let mut unresolved = 0usize;
+        let mut last_seen_relay_message_id = None;
         for item in items {
+            last_seen_relay_message_id = Some(item.id.clone());
             if self.storage.has_relay_message(&item.id)? {
                 continue;
             }
@@ -49,6 +51,13 @@ impl App {
                     self.last_receive_error = Some(reason);
                 }
                 IngestOutcome::Ignored => {}
+            }
+        }
+        if let Some(profile) = self.active_profile.as_mut() {
+            if let Some(last_seen_relay_message_id) = last_seen_relay_message_id.as_deref() {
+                self.storage
+                    .update_profile_sync_cursor(profile.id, Some(last_seen_relay_message_id))?;
+                profile.last_synced_relay_message_id = Some(last_seen_relay_message_id.to_string());
             }
         }
         self.last_ingest_stored = inserted;

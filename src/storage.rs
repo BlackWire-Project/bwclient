@@ -69,17 +69,18 @@ impl Storage {
                 ws_url TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                username TEXT NOT NULL,
-                inbox_id TEXT NOT NULL,
-                registered INTEGER NOT NULL,
-                keys_json TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(server_id, username),
-                FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
-            );
+             CREATE TABLE IF NOT EXISTS profiles (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 server_id INTEGER NOT NULL,
+                 username TEXT NOT NULL,
+                 inbox_id TEXT NOT NULL,
+                 registered INTEGER NOT NULL,
+                 last_synced_relay_message_id TEXT,
+                 keys_json TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 UNIQUE(server_id, username),
+                 FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+             );
 
             CREATE TABLE IF NOT EXISTS contacts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +121,10 @@ impl Storage {
             );
             "#,
         )?;
+        let _ = connection.execute(
+            "ALTER TABLE profiles ADD COLUMN last_synced_relay_message_id TEXT",
+            [],
+        );
         let _ = connection.execute("ALTER TABLE messages ADD COLUMN error_reason TEXT", []);
         Ok(())
     }
@@ -170,7 +175,7 @@ impl Storage {
     pub fn list_profiles_by_server(&self, server_id: i64) -> Result<Vec<LocalProfileRecord>> {
         let connection = self.connect()?;
         let mut stmt = connection.prepare(
-            "SELECT id, server_id, username, inbox_id, registered, keys_json
+            "SELECT id, server_id, username, inbox_id, registered, last_synced_relay_message_id, keys_json
              FROM profiles
              WHERE server_id = ?
              ORDER BY username",
@@ -191,8 +196,8 @@ impl Storage {
         let connection = self.connect()?;
         let keys_json = serde_json::to_string(keys)?;
         connection.execute(
-            "INSERT INTO profiles (server_id, username, inbox_id, registered, keys_json)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO profiles (server_id, username, inbox_id, registered, last_synced_relay_message_id, keys_json)
+             VALUES (?, ?, ?, ?, NULL, ?)",
             params![
                 server_id,
                 username,
@@ -208,7 +213,7 @@ impl Storage {
         let connection = self.connect()?;
         connection
             .query_row(
-                "SELECT id, server_id, username, inbox_id, registered, keys_json
+                "SELECT id, server_id, username, inbox_id, registered, last_synced_relay_message_id, keys_json
                  FROM profiles
                  WHERE id = ?",
                 [profile_id],
@@ -223,6 +228,19 @@ impl Storage {
         connection.execute(
             "UPDATE profiles SET keys_json = ? WHERE id = ?",
             params![keys_json, profile_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_profile_sync_cursor(
+        &self,
+        profile_id: i64,
+        relay_message_id: Option<&str>,
+    ) -> Result<()> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE profiles SET last_synced_relay_message_id = ? WHERE id = ?",
+            params![relay_message_id, profile_id],
         )?;
         Ok(())
     }
@@ -483,9 +501,9 @@ impl Storage {
     }
 
     fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalProfileRecord> {
-        let keys_json: String = row.get(5)?;
+        let keys_json: String = row.get(6)?;
         let keys = serde_json::from_str(&keys_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(err))
         })?;
         Ok(LocalProfileRecord {
             id: row.get(0)?,
@@ -493,6 +511,7 @@ impl Storage {
             username: row.get(2)?,
             inbox_id: row.get(3)?,
             registered: row.get::<_, i64>(4)? == 1,
+            last_synced_relay_message_id: row.get(5)?,
             keys,
         })
     }

@@ -24,7 +24,10 @@ use crate::{
         identity_json, parse_identity_json, prepare_initial_message, prepare_session_message,
         receive_prekey_message, receive_session_message, rotate_local_ratchet,
     },
-    relay::{PostMessageRequest, RegisterUserRequest, RelayClient, ensure_server_health},
+    relay::{
+        PostMessageRequest, PostMessageResponse, RegisterUserRequest, RelayClient,
+        ensure_server_health,
+    },
     state::{
         ContactRecord, ConversationRecord, LocalProfileRecord, MessageDirection, MessageRecord,
         MessageStatus, ServerRecord,
