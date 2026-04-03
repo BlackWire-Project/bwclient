@@ -124,6 +124,7 @@ pub enum MessageStatus {
     Failed,
     RawUnresolved,
     DecryptFailed,
+    IdentityMismatch,
     SessionMissing,
     UnsupportedHeader,
 }
@@ -138,6 +139,7 @@ impl MessageStatus {
             Self::Failed => "failed",
             Self::RawUnresolved => "raw_unresolved",
             Self::DecryptFailed => "decrypt_failed",
+            Self::IdentityMismatch => "identity_mismatch",
             Self::SessionMissing => "session_missing",
             Self::UnsupportedHeader => "unsupported_header",
         }
@@ -151,6 +153,7 @@ impl MessageStatus {
             "local_only" => Self::LocalOnly,
             "raw_unresolved" => Self::RawUnresolved,
             "decrypt_failed" => Self::DecryptFailed,
+            "identity_mismatch" => Self::IdentityMismatch,
             "session_missing" => Self::SessionMissing,
             "unsupported_header" => Self::UnsupportedHeader,
             _ => Self::Received,

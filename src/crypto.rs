@@ -592,7 +592,7 @@ pub fn decode_bytes(value: &str) -> Result<Vec<u8>> {
 }
 
 fn random_inbox_id() -> String {
-    let mut bytes = [0u8; 18];
+    let mut bytes = [0u8; 48];
     OsRng.fill_bytes(&mut bytes);
     encode_bytes(&bytes)
 }
@@ -612,6 +612,23 @@ mod tests {
             prekey_id: Some(Uuid::new_v4().to_string()),
             one_time_prekey: Some(keys.one_time_prekeys[0].public_key.clone()),
         }
+    }
+
+    #[test]
+    fn random_inbox_id_has_higher_entropy_payload_length() {
+        let inbox_id = random_inbox_id();
+        let decoded = decode_bytes(&inbox_id).unwrap();
+
+        assert_eq!(decoded.len(), 48);
+    }
+
+    fn tamper_header<F>(header_json: &str, mutate: F) -> String
+    where
+        F: FnOnce(&mut MessageHeader),
+    {
+        let mut header: MessageHeader = serde_json::from_str(header_json).unwrap();
+        mutate(&mut header);
+        serde_json::to_string(&header).unwrap()
     }
 
     #[test]
@@ -649,5 +666,244 @@ mod tests {
         )
         .unwrap();
         assert_eq!(alice_in.plaintext, "reply");
+    }
+
+    #[test]
+    fn verify_signed_prekey_rejects_tampered_signature() {
+        let (keys, _) = generate_profile_material(1).unwrap();
+        let mut signature = decode_bytes(&keys.signed_prekey_signature).unwrap();
+        signature[0] ^= 0x01;
+
+        let error = verify_signed_prekey(
+            &keys.identity_sign_public,
+            &keys.signed_prekey_public,
+            &encode_bytes(&signature),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid signed_prekey signature"));
+    }
+
+    #[test]
+    fn verify_signed_prekey_rejects_tampered_signed_prekey() {
+        let (keys, _) = generate_profile_material(1).unwrap();
+        let mut public = decode_32(&keys.signed_prekey_public).unwrap();
+        public[0] ^= 0x01;
+
+        let error = verify_signed_prekey(
+            &keys.identity_sign_public,
+            &encode_bytes(&public),
+            &keys.signed_prekey_signature,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid signed_prekey signature"));
+    }
+
+    #[test]
+    fn verify_signed_prekey_rejects_wrong_identity_signer() {
+        let (keys, _) = generate_profile_material(1).unwrap();
+        let (other_keys, _) = generate_profile_material(1).unwrap();
+
+        let error = verify_signed_prekey(
+            &other_keys.identity_sign_public,
+            &keys.signed_prekey_public,
+            &keys.signed_prekey_signature,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid signed_prekey signature"));
+    }
+
+    #[test]
+    fn receive_prekey_message_rejects_wrong_message_type() {
+        let (alice_keys, alice_inbox) = generate_profile_material(4).unwrap();
+        let (mut bob_keys, bob_inbox) = generate_profile_material(4).unwrap();
+        let bob_bundle = bundle("bob", &bob_inbox, &bob_keys);
+        let alice_out =
+            prepare_initial_message("alice", &alice_inbox, &alice_keys, &bob_bundle, "hello")
+                .unwrap();
+        let tampered = tamper_header(&alice_out.header_json, |header| {
+            header.message_type = "ratchet_message".to_string();
+        });
+
+        let error = receive_prekey_message(
+            &mut bob_keys,
+            "bob",
+            &bob_inbox,
+            &tampered,
+            &alice_out.ciphertext,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected prekey_message header"));
+    }
+
+    #[test]
+    fn receive_prekey_message_rejects_missing_one_time_prekey() {
+        let (alice_keys, alice_inbox) = generate_profile_material(4).unwrap();
+        let (mut bob_keys, bob_inbox) = generate_profile_material(4).unwrap();
+        let bob_bundle = bundle("bob", &bob_inbox, &bob_keys);
+        let alice_out =
+            prepare_initial_message("alice", &alice_inbox, &alice_keys, &bob_bundle, "hello")
+                .unwrap();
+        let tampered = tamper_header(&alice_out.header_json, |header| {
+            header.used_one_time_prekey = Some(encode_bytes(b"missing-prekey-material"));
+        });
+
+        let error = receive_prekey_message(
+            &mut bob_keys,
+            "bob",
+            &bob_inbox,
+            &tampered,
+            &alice_out.ciphertext,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("missing one-time prekey for incoming message"));
+    }
+
+    #[test]
+    fn receive_prekey_message_rejects_tampered_ciphertext() {
+        let (alice_keys, alice_inbox) = generate_profile_material(4).unwrap();
+        let (mut bob_keys, bob_inbox) = generate_profile_material(4).unwrap();
+        let bob_bundle = bundle("bob", &bob_inbox, &bob_keys);
+        let alice_out =
+            prepare_initial_message("alice", &alice_inbox, &alice_keys, &bob_bundle, "hello")
+                .unwrap();
+        let mut ciphertext = decode_bytes(&alice_out.ciphertext).unwrap();
+        let last = ciphertext.len() - 1;
+        ciphertext[last] ^= 0x01;
+
+        let error = receive_prekey_message(
+            &mut bob_keys,
+            "bob",
+            &bob_inbox,
+            &alice_out.header_json,
+            &encode_bytes(&ciphertext),
+        )
+        .unwrap_err();
+
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn receive_prekey_message_accepts_arbitrary_sender_username_with_same_keys() {
+        let (alice_keys, alice_inbox) = generate_profile_material(4).unwrap();
+        let (mut bob_keys, bob_inbox) = generate_profile_material(4).unwrap();
+        let bob_bundle = bundle("bob", &bob_inbox, &bob_keys);
+        let spoofed =
+            prepare_initial_message("mallory", &alice_inbox, &alice_keys, &bob_bundle, "hello")
+                .unwrap();
+        let received = receive_prekey_message(
+            &mut bob_keys,
+            "bob",
+            &bob_inbox,
+            &spoofed.header_json,
+            &spoofed.ciphertext,
+        )
+        .unwrap();
+
+        assert_eq!(received.plaintext, "hello");
+        assert_eq!(received.header.sender_username, "mallory");
+    }
+
+    #[test]
+    fn receive_session_message_rejects_wrong_message_type() {
+        let (alice_keys, alice_inbox) = generate_profile_material(4).unwrap();
+        let (mut bob_keys, bob_inbox) = generate_profile_material(4).unwrap();
+        let bob_bundle = bundle("bob", &bob_inbox, &bob_keys);
+        let alice_out =
+            prepare_initial_message("alice", &alice_inbox, &alice_keys, &bob_bundle, "hello")
+                .unwrap();
+        let bob_in = receive_prekey_message(
+            &mut bob_keys,
+            "bob",
+            &bob_inbox,
+            &alice_out.header_json,
+            &alice_out.ciphertext,
+        )
+        .unwrap();
+        let mut bob_session = bob_in.session;
+        bob_session.session_id = bob_in.header.session_id.clone();
+        bob_session.peer_username = Some("alice".to_string());
+        bob_session.peer_inbox_id = alice_inbox.clone();
+        rotate_local_ratchet(&mut bob_session).unwrap();
+        let bob_reply = prepare_session_message(&bob_session, "bob", &bob_inbox, "reply").unwrap();
+        let tampered = tamper_header(&bob_reply.header_json, |header| {
+            header.message_type = "prekey_message".to_string();
+        });
+
+        let error =
+            receive_session_message(&alice_out.session, &tampered, &bob_reply.ciphertext).unwrap_err();
+        assert!(error.to_string().contains("expected ratchet_message header"));
+    }
+
+    #[test]
+    fn receive_session_message_rejects_tampered_ciphertext() {
+        let (alice_keys, alice_inbox) = generate_profile_material(4).unwrap();
+        let (mut bob_keys, bob_inbox) = generate_profile_material(4).unwrap();
+        let bob_bundle = bundle("bob", &bob_inbox, &bob_keys);
+        let alice_out =
+            prepare_initial_message("alice", &alice_inbox, &alice_keys, &bob_bundle, "hello")
+                .unwrap();
+        let bob_in = receive_prekey_message(
+            &mut bob_keys,
+            "bob",
+            &bob_inbox,
+            &alice_out.header_json,
+            &alice_out.ciphertext,
+        )
+        .unwrap();
+        let mut bob_session = bob_in.session;
+        bob_session.session_id = bob_in.header.session_id.clone();
+        bob_session.peer_username = Some("alice".to_string());
+        bob_session.peer_inbox_id = alice_inbox.clone();
+        rotate_local_ratchet(&mut bob_session).unwrap();
+        let bob_reply = prepare_session_message(&bob_session, "bob", &bob_inbox, "reply").unwrap();
+        let mut ciphertext = decode_bytes(&bob_reply.ciphertext).unwrap();
+        ciphertext[0] ^= 0x01;
+
+        let error = receive_session_message(
+            &alice_out.session,
+            &bob_reply.header_json,
+            &encode_bytes(&ciphertext),
+        )
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn receive_session_message_rejects_wrong_session_state() {
+        let (alice_keys, alice_inbox) = generate_profile_material(4).unwrap();
+        let (mut bob_keys, bob_inbox) = generate_profile_material(4).unwrap();
+        let (eve_keys, eve_inbox) = generate_profile_material(4).unwrap();
+        let bob_bundle = bundle("bob", &bob_inbox, &bob_keys);
+        let eve_bundle = bundle("eve", &eve_inbox, &eve_keys);
+        let alice_out =
+            prepare_initial_message("alice", &alice_inbox, &alice_keys, &bob_bundle, "hello")
+                .unwrap();
+        let bob_in = receive_prekey_message(
+            &mut bob_keys,
+            "bob",
+            &bob_inbox,
+            &alice_out.header_json,
+            &alice_out.ciphertext,
+        )
+        .unwrap();
+        let mut bob_session = bob_in.session;
+        bob_session.session_id = bob_in.header.session_id.clone();
+        bob_session.peer_username = Some("alice".to_string());
+        bob_session.peer_inbox_id = alice_inbox.clone();
+        rotate_local_ratchet(&mut bob_session).unwrap();
+        let bob_reply = prepare_session_message(&bob_session, "bob", &bob_inbox, "reply").unwrap();
+        let wrong_session =
+            prepare_initial_message("alice", &alice_inbox, &alice_keys, &eve_bundle, "other")
+                .unwrap()
+                .session;
+
+        assert!(receive_session_message(&wrong_session, &bob_reply.header_json, &bob_reply.ciphertext).is_err());
     }
 }
