@@ -1,87 +1,18 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+use super::types::{
+    AddPrekeysRequest, AddPrekeysResponse, ErrorEnvelope, ListMessagesResponse, PostMessageRequest,
+    PostMessageResponse, RegisterUserRequest, RegisterUserResponse, RelayBundle, RelayMessage,
+};
 
 #[derive(Clone)]
 pub struct RelayClient {
     base_url: String,
     http: Client,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct RegisterUserRequest {
-    pub username: String,
-    pub identity_key: String,
-    pub signed_prekey: String,
-    pub signed_prekey_signature: String,
-    pub inbox_id: String,
-    pub one_time_prekeys: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RegisterUserResponse {
-    pub id: String,
-    pub username: String,
-    pub inbox_id: String,
-    pub created_at: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RelayBundle {
-    pub username: String,
-    pub identity_key: String,
-    pub signed_prekey: String,
-    pub signed_prekey_signature: String,
-    pub inbox_id: String,
-    pub prekey_id: Option<String>,
-    pub one_time_prekey: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct AddPrekeysRequest {
-    pub one_time_prekeys: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct AddPrekeysResponse {
-    pub count: i64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PostMessageRequest {
-    pub inbox_id: String,
-    pub kind: String,
-    pub header: String,
-    pub ciphertext: String,
-    pub used_prekey_id: Option<String>,
-    pub client_message_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PostMessageResponse {
-    pub id: String,
-    pub created_at: String,
-    pub expires_at: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RelayMessage {
-    pub id: String,
-    pub inbox_id: String,
-    pub kind: String,
-    pub header: String,
-    pub ciphertext: String,
-    pub used_prekey_id: Option<String>,
-    pub client_message_id: String,
-    pub created_at: String,
-    pub expires_at: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ErrorEnvelope {
-    error: String,
 }
 
 impl RelayClient {
@@ -141,13 +72,35 @@ impl RelayClient {
         )
     }
 
-    pub fn list_messages(&self, inbox_id: &str, limit: usize) -> Result<Vec<RelayMessage>> {
+    pub fn list_messages(
+        &self,
+        inbox_id: &str,
+        limit: usize,
+        after_id: Option<&str>,
+    ) -> Result<ListMessagesResponse> {
+        self.handle_response({
+            let mut request = self
+                .http
+                .get(format!("{}/messages", self.base_url))
+                .query(&[("inbox_id", inbox_id), ("limit", &limit.to_string())]);
+            if let Some(after_id) = after_id {
+                request = request.query(&[("after_id", after_id)]);
+            }
+            request
+                .send()
+                .with_context(|| format!("failed to list messages for inbox {inbox_id}"))?
+        })
+    }
+
+    pub fn get_message(&self, inbox_id: &str, message_id: &str) -> Result<RelayMessage> {
         self.handle_response(
             self.http
-                .get(format!("{}/messages", self.base_url))
-                .query(&[("inbox_id", inbox_id), ("limit", &limit.to_string())])
+                .get(format!("{}/messages/{message_id}", self.base_url))
+                .query(&[("inbox_id", inbox_id)])
                 .send()
-                .with_context(|| format!("failed to list messages for inbox {inbox_id}"))?,
+                .with_context(|| {
+                    format!("failed to fetch message {message_id} for inbox {inbox_id}")
+                })?,
         )
     }
 
@@ -183,13 +136,13 @@ pub fn ensure_server_health(base_url: &str) -> Result<()> {
     let client = Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
-        .context("failed to build health-check client")?;
+        .context("failed to build relay health client")?;
     let response = client
         .get(format!("{}/health", base_url.trim_end_matches('/')))
         .send()
         .context("failed to call relay health endpoint")?;
-    if !response.status().is_success() {
-        return Err(anyhow!("relay health-check returned {}", response.status()));
+    if response.status().is_success() {
+        return Ok(());
     }
-    Ok(())
+    bail!("relay health endpoint returned {}", response.status())
 }
